@@ -145,8 +145,8 @@ function scoreAssignment(teams, partnerCounts, opponentCounts) {
       for (const b of t2) {
         const oppKey = [a, b].sort().join('-');
         const oppCount = opponentCounts[oppKey] || 0;
-        // Moderate penalty for repeat opponents
-        score += oppCount > 0 ? 30 + oppCount * 15 : -3;
+        // Strong penalty for repeat opponents — nearly as costly as partner repeats
+        score += oppCount > 0 ? 60 + oppCount * 30 : -3;
       }
     }
   }
@@ -154,10 +154,58 @@ function scoreAssignment(teams, partnerCounts, opponentCounts) {
 }
 
 /**
- * Find the best court assignment from a pool of players across n courts.
- * Runs 80 random shuffle attempts and picks the lowest-scoring assignment.
+ * Given 4 players on a court, find the best team split.
+ * Evaluates all 3 possible 2v2 arrangements and picks the one with:
+ *   - best rating balance (smallest gap between team totals)
+ *   - fewest partner repeats
+ *
+ * @param {string[]} four     - 4 player IDs
+ * @param {object}   ratings  - { playerId: number }
+ * @param {object}   partnerCounts - { "id1-id2": count }
+ * @returns {{ t1: string[], t2: string[] }}
  */
-function bestCourtAssignment(playing, numCourts, partnerCounts, opponentCounts) {
+function balanceTeams(four, ratings, partnerCounts) {
+  // Sort by rating descending: [strongest, 2nd, 3rd, weakest]
+  const sorted = [...four].sort((a, b) => (ratings[b] || 1000) - (ratings[a] || 1000));
+  const [a, b, c, d] = sorted;
+
+  // All 3 possible 2v2 splits
+  const splits = [
+    { t1: [a, d], t2: [b, c] }, // 1&4 vs 2&3 — most balanced by rating
+    { t1: [a, c], t2: [b, d] }, // 1&3 vs 2&4
+    { t1: [a, b], t2: [c, d] }, // 1&2 vs 3&4 — least balanced
+  ];
+
+  let bestSplit = splits[0];
+  let bestCost = Infinity;
+
+  for (const split of splits) {
+    const r1 = (ratings[split.t1[0]] || 1000) + (ratings[split.t1[1]] || 1000);
+    const r2 = (ratings[split.t2[0]] || 1000) + (ratings[split.t2[1]] || 1000);
+    const ratingGap = Math.abs(r1 - r2);
+
+    const pk1 = [...split.t1].sort().join('-');
+    const pk2 = [...split.t2].sort().join('-');
+    const partnerRepeat = (partnerCounts[pk1] || 0) + (partnerCounts[pk2] || 0);
+
+    // Weight: rating gap matters, but partner freshness matters more
+    const cost = ratingGap * 0.5 + partnerRepeat * 100;
+
+    if (cost < bestCost) {
+      bestCost = cost;
+      bestSplit = split;
+    }
+  }
+
+  return bestSplit;
+}
+
+/**
+ * Find the best court assignment from a pool of players across n courts.
+ * Runs many random shuffle attempts and picks the lowest-scoring assignment.
+ * Then balances teams within each court using ratings.
+ */
+function bestCourtAssignment(playing, numCourts, partnerCounts, opponentCounts, ratings = {}) {
   let bestAssignment = null;
   let bestScore = Infinity;
 
@@ -181,6 +229,14 @@ function bestCourtAssignment(playing, numCourts, partnerCounts, opponentCounts) 
     }
   }
 
+  // Phase 2: Balance teams within each court using ratings + partner history
+  if (bestAssignment && Object.keys(ratings).length > 0) {
+    bestAssignment = bestAssignment.map((court) => {
+      const four = [...court.t1, ...court.t2];
+      return balanceTeams(four, ratings, partnerCounts);
+    });
+  }
+
   return bestAssignment;
 }
 
@@ -193,9 +249,10 @@ function bestCourtAssignment(playing, numCourts, partnerCounts, opponentCounts) 
  * @param {number}   courts      - Number of configured courts
  * @param {object[]} previousRounds
  * @param {object}   gamesPlayed - { playerId: count }
+ * @param {object}   ratings     - { playerId: number } (optional)
  * @returns {{ games: object[], sittingOut: string[] }}
  */
-export function generateRound(playerIds, courts, previousRounds = [], gamesPlayed = {}) {
+export function generateRound(playerIds, courts, previousRounds = [], gamesPlayed = {}, ratings = {}) {
   const playersPerRound = courts * 4;
 
   // Find global minimum games played
@@ -239,7 +296,7 @@ export function generateRound(playerIds, courts, previousRounds = [], gamesPlaye
 
   const { partnerCounts, opponentCounts } = buildHistory(previousRounds);
   const numCourts = Math.floor(playing.length / 4);
-  const bestAssignment = bestCourtAssignment(playing, numCourts, partnerCounts, opponentCounts);
+  const bestAssignment = bestCourtAssignment(playing, numCourts, partnerCounts, opponentCounts, ratings);
 
   const now = Date.now();
   const games = bestAssignment.map(({ t1, t2 }, c) => ({
@@ -260,9 +317,10 @@ export function generateRound(playerIds, courts, previousRounds = [], gamesPlaye
  * Rotate finished courts — pull in waiting players, keep unfinished courts running.
  *
  * @param {object} session  - Active session object (mutated in place)
+ * @param {object} ratings  - { playerId: number } (optional)
  * @returns {{ ok: true } | { error: string, status: number }}
  */
-export function rotateCourts(session) {
+export function rotateCourts(session, ratings = {}) {
   const curRound = session.rounds[session.rounds.length - 1];
   if (!curRound) return { error: 'No active round', status: 400 };
 
@@ -312,7 +370,7 @@ export function rotateCourts(session) {
 
   const { partnerCounts, opponentCounts } = buildHistory(session.rounds);
   const numCourts = Math.floor(playing.length / 4);
-  const bestAssignment = bestCourtAssignment(playing, numCourts, partnerCounts, opponentCounts);
+  const bestAssignment = bestCourtAssignment(playing, numCourts, partnerCounts, opponentCounts, ratings);
 
   // Archive finished games
   if (!curRound.completedGames) curRound.completedGames = [];
@@ -360,9 +418,10 @@ export function rotateCourts(session) {
  *
  * @param {object} session
  * @param {number} court   - Court number to respin
+ * @param {object} ratings - { playerId: number } (optional)
  * @returns {{ ok: true } | { error: string, status: number }}
  */
-export function respinCourt(session, court) {
+export function respinCourt(session, court, ratings = {}) {
   const curRound = session.rounds[session.rounds.length - 1];
   if (!curRound) return { error: 'No active round', status: 400 };
 
@@ -388,7 +447,7 @@ export function respinCourt(session, court) {
     if (tempGamesPlayed[id] > 0) tempGamesPlayed[id]--;
   });
 
-  const newRound = generateRound(allAvailable, 1, previousRounds, tempGamesPlayed);
+  const newRound = generateRound(allAvailable, 1, previousRounds, tempGamesPlayed, ratings);
   if (!newRound.games || newRound.games.length === 0) {
     return { error: 'Could not generate pairing', status: 400 };
   }
