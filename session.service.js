@@ -208,6 +208,7 @@ function balanceTeams(four, ratings, partnerCounts) {
 function bestCourtAssignment(playing, numCourts, partnerCounts, opponentCounts, ratings = {}) {
   let bestAssignment = null;
   let bestScore = Infinity;
+  const hasRatings = Object.keys(ratings).length > 0;
 
   // More attempts for better coverage — especially important with many players
   const attempts = Math.max(200, playing.length * 20);
@@ -218,7 +219,13 @@ function bestCourtAssignment(playing, numCourts, partnerCounts, opponentCounts, 
     for (let c = 0; c < numCourts; c++) {
       const s = c * 4;
       if (s + 3 >= sh.length) break;
-      courts.push({ t1: [sh[s], sh[s + 1]], t2: [sh[s + 2], sh[s + 3]] });
+      const four = [sh[s], sh[s + 1], sh[s + 2], sh[s + 3]];
+      // Balance teams BEFORE scoring so the score reflects actual team arrangement
+      if (hasRatings) {
+        courts.push(balanceTeams(four, ratings, partnerCounts));
+      } else {
+        courts.push({ t1: [four[0], four[1]], t2: [four[2], four[3]] });
+      }
     }
     const score = scoreAssignment(courts, partnerCounts, opponentCounts);
     if (!bestAssignment || score < bestScore) {
@@ -227,14 +234,6 @@ function bestCourtAssignment(playing, numCourts, partnerCounts, opponentCounts, 
       // Early exit if we found a perfectly fresh assignment (no repeats at all)
       if (bestScore <= -(numCourts * 26)) break;
     }
-  }
-
-  // Phase 2: Balance teams within each court using ratings + partner history
-  if (bestAssignment && Object.keys(ratings).length > 0) {
-    bestAssignment = bestAssignment.map((court) => {
-      const four = [...court.t1, ...court.t2];
-      return balanceTeams(four, ratings, partnerCounts);
-    });
   }
 
   return bestAssignment;
